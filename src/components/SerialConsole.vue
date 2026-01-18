@@ -12,7 +12,7 @@
         <option value="115200">115200</option>
       </select>
     </label>
-    <button @click="connect">Connect</button>
+    <button @click="connect" :disabled="port">Connect</button>
     <button @click="disconnect" :disabled="!port">Disconnect</button>
 
     <div>
@@ -42,6 +42,8 @@ import { ref } from 'vue'
 const port = ref(null)
 const reader = ref(null)
 const writer = ref(null)
+const readableStreamClosed = ref(null)
+const writableStreamClosed = ref(null)
 const received = ref('')
 const sendText = ref('')
 const log = ref('')
@@ -65,12 +67,14 @@ async function connect() {
       portInfo.value = '情報取得不可'
     }
 
+    // close の際に閉じるのを待つために pipeTo の結果を保存しておく必要がある
+
     const textDecoder = new TextDecoderStream()
-    const readableStreamClosed = port.value.readable.pipeTo(textDecoder.writable)
+    readableStreamClosed.value = port.value.readable.pipeTo(textDecoder.writable)
     reader.value = textDecoder.readable.getReader()
 
     const textEncoder = new TextEncoderStream()
-    const writableStreamClosed = textEncoder.readable.pipeTo(port.value.writable)
+    writableStreamClosed.value = textEncoder.readable.pipeTo(port.value.writable)
     writer.value = textEncoder.writable.getWriter()
 
     log.value = '接続に成功しました'
@@ -96,10 +100,12 @@ async function send() {
 
 async function disconnect() {
   let errorMsg = ''
+
+  // reader, writerの解放
   if (reader.value) {
     await reader.value.cancel()
     try {
-      reader.value.releaseLock()
+      await reader.value.releaseLock()
     } catch (e) {
       errorMsg += '\nreader releaseLock error: ' + e
     }
@@ -107,20 +113,41 @@ async function disconnect() {
   if (writer.value) {
     await writer.value.close()
     try {
-      writer.value.releaseLock()
+      await writer.value.releaseLock()
     } catch (e) {
       errorMsg += '\nwriter releaseLock error: ' + e
     }
   }
+
+  // pipeToのPromiseを待つ必要がある。でないとロックが解除されず port.close() でエラーになることがある
+  try {
+    if (readableStreamClosed.value) {
+      await readableStreamClosed.value
+    }
+  } catch (e) {
+    // 読み取りストリーム終了時のエラーは無視
+  }
+  try {
+    if (writableStreamClosed.value) {
+      await writableStreamClosed.value
+    }
+  } catch (e) {
+    // 書き込みストリーム終了時のエラーは無視
+  }
+  reader.value = null
+  writer.value = null
+
+  // ポートのクローズ
   if (port.value) {
     try {
       await port.value.close()
     } catch (e) {
       errorMsg += '\nport close error: ' + e
     }
+    port.value = null
   }
   portInfo.value = ''
-  log.value = errorMsg ? '切断時エラー:\n' + errorMsg : '切断処理中（ストリーム終了待ち）'
+  log.value = errorMsg ? '切断時エラー:\n' + errorMsg : '切断しました'
 }
 </script>
 
