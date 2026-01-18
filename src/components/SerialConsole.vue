@@ -20,7 +20,7 @@
     </div>
 
     <input v-model="sendText" placeholder="Send text" />
-    <button @click="send" :disabled="!port">Send</button>
+    <button @click="send" :disabled="!writer">Send</button>
 
     <div style="margin-top: 1em;">
       <strong>ログ:</strong>
@@ -41,7 +41,7 @@ import { ref } from 'vue'
 
 const port = ref(null)
 const reader = ref(null)
-/* writerは都度生成方式に変更 */
+const writer = ref(null)
 const received = ref('')
 const sendText = ref('')
 const log = ref('')
@@ -69,7 +69,9 @@ async function connect() {
     const readableStreamClosed = port.value.readable.pipeTo(textDecoder.writable)
     reader.value = textDecoder.readable.getReader()
 
-    // writerは都度生成方式に変更
+    const textEncoder = new TextEncoderStream()
+    const writableStreamClosed = textEncoder.readable.pipeTo(port.value.writable)
+    writer.value = textEncoder.writable.getWriter()
 
     log.value = '接続に成功しました'
     readLoop()
@@ -82,55 +84,42 @@ async function connect() {
 async function readLoop() {
   while (true) {
     const { value, done } = await reader.value.read()
-    if (done) {
-      // ストリーム終了時にリソース解放
-      try {
-        reader.value.releaseLock()
-      } catch (e) {
-        log.value += '\nreader releaseLock error: ' + e
-      }
-      reader.value = null
-      // ポートのクローズ
-      if (port.value) {
-        try {
-          await port.value.close()
-        } catch (e) {
-          log.value += '\nport close error: ' + e
-        }
-        port.value = null
-      }
-      portInfo.value = ''
-      log.value += '\n切断しました'
-      break
-    }
+    if (done) break
     received.value += value
   }
 }
 
 async function send() {
-  if (!port.value) return
-  const encoder = new TextEncoderStream()
-  const writableStreamClosed = encoder.readable.pipeTo(port.value.writable)
-  const writer = encoder.writable.getWriter()
-  try {
-    await writer.write(sendText.value + '\n')
-    await writer.close()
-    await writableStreamClosed
-  } catch (e) {
-    log.value += '\nsend error: ' + e
-  }
+  if (!writer.value) return
+  await writer.value.write(sendText.value + '\n')
 }
 
 async function disconnect() {
   let errorMsg = ''
-  // readerのキャンセルのみ
   if (reader.value) {
+    await reader.value.cancel()
     try {
-      await reader.value.cancel()
+      reader.value.releaseLock()
     } catch (e) {
-      errorMsg += `reader cancel error: ${e}\n`
+      errorMsg += '\nreader releaseLock error: ' + e
     }
   }
+  if (writer.value) {
+    await writer.value.close()
+    try {
+      writer.value.releaseLock()
+    } catch (e) {
+      errorMsg += '\nwriter releaseLock error: ' + e
+    }
+  }
+  if (port.value) {
+    try {
+      await port.value.close()
+    } catch (e) {
+      errorMsg += '\nport close error: ' + e
+    }
+  }
+  portInfo.value = ''
   log.value = errorMsg ? '切断時エラー:\n' + errorMsg : '切断処理中（ストリーム終了待ち）'
 }
 </script>
